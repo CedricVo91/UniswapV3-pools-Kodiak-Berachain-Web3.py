@@ -3,6 +3,7 @@ from eth_account import Account
 import json
 import os
 from typing import Optional # useful to declare types for web3 object types
+import math
 
 # Define a class to setup Pool initialization on Kodiak V3
 class KodiakV3Setup:
@@ -13,7 +14,7 @@ class KodiakV3Setup:
     - Use the pool to implement the Price Attack!
     """
 
-    def __init__(self, token1_address: str, token2_address: str, factory_address: str, rpc_url: str):
+    def __init__(self, token1_address: str, token2_address: str, factory_address: str, rpc_url: str, nft_manager_address: str):
         ## Golden Rule for good class design -> Initialization Clarity: The init method should establish everything the class needs to function. 
         ## How would you modify the class to make it impossible to use it incorrectly?
         ## I should list all the attributes this KodiakV3Setup class would need <=> What is needed to setup a v3 pool on kodiak?
@@ -41,6 +42,9 @@ class KodiakV3Setup:
         except json.JSONDecodeError:
             raise ValueError("Invalid ABI JSON format")
 
+        # nft_manager_address so we can add liquidity to our pool
+        self.nft_manager_address = nft_manager_address
+
     def set_signer(self, private_key: str):
         """Set up the account that will sign transactions"""
         self.account = Account.from_key(private_key)
@@ -50,9 +54,10 @@ class KodiakV3Setup:
         fee = 100 # 0.01% for stable coin and ensuring minimal slippage 
         
         # check if pool already exists to avoid recreating it when we run our script for testing purposes and save gas
-        existing_pool = self.factory.functions.getPool(self.token0_address, self.token1_address, fee).call()
-        if existing_pool != "0x0000000000000000000000000000000000000000": # use the zero address to check if pool is not instantiated yet
-            raise ValueError("Pool already exists at: ", existing_pool)
+        existing_pool_address = self.factory.functions.getPool(self.token0_address, self.token1_address, fee).call()
+        if existing_pool_address != "0x0000000000000000000000000000000000000000": # use the zero address to check if pool is not instantiated yet
+            print(f"Pool already exists at: {existing_pool_address}")
+            return existing_pool_address
 
         try: 
             # Estimate gas and add buffer
@@ -73,7 +78,12 @@ class KodiakV3Setup:
             if tx_receipt['status'] != 1:
                 raise RuntimeError("Pool creation failed")
             
-            return tx_hash.hex()  # Return transaction hash as hex string
+            # get pool address out of transaction
+            # Get pool address from event logs
+            pool_created_event = self.factory.events.PoolCreated().process_receipt(tx_receipt)[0]
+            pool_address = pool_created_event['args']['pool']
+
+            return pool_address  # Return transaction hash as hex string
         
         except Exception as e:
             raise RuntimeError(f"Failed to create pool: {str(e)}")
@@ -90,8 +100,132 @@ class KodiakV3Setup:
         #return w3.to_hex(w3.keccak(signed_txn.raw_transaction)) # should give me back the hash of the transaction
     
     # in V3 we first have to initialize the pool! Important difference to v2
-    def initialize_V3pool():
-        pass
+    def initialize_V3pool(self, pool_address: str):
+        """
+        Initialize a newly created pool with 1:1 price for stablecoins
+        """
+        # For 1:1 price (stablecoins):
+        # 1. Start with price = 1.0
+        # 2. Take square root: √1 = 1.0
+        # 3. Multiply by 2^96 for Q64.96 encoding
+        INITIAL_SQRTPRICE = 1 * 2**96  # = 79228162514264337593543950336
+        
+        with open("pool_abi.json", "r") as f:
+            pool_abi = json.load(f)
+        pool = self.w3.eth.contract(address=pool_address, abi = pool_abi)
+
+        # Check if pool is already initialized
+        try:
+            slot0 = pool.functions.slot0().call()
+            current_sqrt_price = slot0[0]
+            print(f"Pool already initialized with sqrt price: {current_sqrt_price}")
+            return None  
+        
+        # Pool is not yet initialized 
+        except Exception:
+            # send transaction to initialize the pool
+            try:
+                nonce = self.w3.eth.get_transaction_count(self.account.address)
+
+                # build transaction
+                tx = pool.functions.initialize(INITIAL_SQRTPRICE).build_transaction({'from': self.account.address, 'nonce': nonce, 'gas': 200000})
+
+                # Sign and send
+                signed_tx = self.w3.eth.account.sign_transaction(tx, self.account.key)
+                tx_hash = self.w3.eth.send_raw_transaction(signed_tx.raw_transaction)
+        
+                # Wait for confirmation
+                tx_receipt = self.w3.eth.wait_for_transaction_receipt(tx_hash)
+            
+                if tx_receipt['status'] != 1:
+                    raise RuntimeError("Pool initialization failed")
+                
+                return tx_hash.hex()
+
+            except Exception as e:
+                raise RuntimeError(f"failed to initialize pool: {str(e)}")    
+
+    def add_full_range_liquidity(self, pool_address, amount0, amount1):
+        
+        # Set maxmimal tick range to mimick v2 pool
+        # Docs: Computes sqrt price for ticks of size 1.0001, i.e. sqrt(1.0001^tick) as fixed point Q64.96 numbers. 
+        # Supports prices between 2-128 and 2128
+        # These are the actual values from TickMath library
+        price_step = 1.0001
+        min_allowed_price = 2**(-128)
+        max_allowed_price = 2**128
+
+        # in the mint function the min and max ticks must be of type int!
+        MIN_TICK = int(math.log(min_allowed_price) / math.log(price_step)) # TickMath.MIN_TICK -> they represent how many steps we need to get to the value needed. in our case the max and min value given by the docs
+        MAX_TICK = int(math.log(max_allowed_price) / math.log(price_step)) # TickMath.MAX_TICK
+        
+        #MIN_TICK = -887272
+        #MAX_TICK = 887272 
+        #initialize the nft_manager contract on Uniswap V3
+        with open("nft_manager_abi.json", "r") as f:
+            nft_manager_abi = json.load(f)
+        
+        # Initialize the nft_manager V3
+        
+
+        # Convert addresses to checksum format
+        nft_manager_address = Web3.to_checksum_address(self.nft_manager_address)
+        nft_manager = self.w3.eth.contract(address= nft_manager_address, abi = nft_manager_abi)
+        token0_address = Web3.to_checksum_address(self.token0_address)
+        token1_address = Web3.to_checksum_address(self.token1_address)
+        # Approve the spending of token 0 and 1 on the nft manager
+        with open("ERC20_abi.json", "r") as f:
+            erc20_abi = json.load(f)
+        
+        try:
+            for token_addr, amount in [(token0_address, amount0), (token1_address, amount1)]:
+                token = self.w3.eth.contract(address=token_addr, abi=erc20_abi)
+                tx = token.functions.approve(nft_manager_address, amount).build_transaction({
+                'from': self.account.address,
+                'nonce': self.w3.eth.get_transaction_count(self.account.address),
+                'gas': 100000
+                })
+                signed_tx = self.w3.eth.account.sign_transaction(tx, self.account.key)
+                tx_hash = self.w3.eth.send_raw_transaction(signed_tx.raw_transaction)
+                self.w3.eth.wait_for_transaction_receipt(tx_hash)
+                print(f"Approved token {token_addr}")
+            
+            print("both tokens approved!")
+            
+        except Exception as e:
+            raise RuntimeError("couldnt approve tokens: ",e)
+
+        try: 
+            tx = nft_manager.functions.mint({
+            'token0': token0_address,
+            'token1': token1_address,
+            'fee': 100,
+            'tickLower': MIN_TICK,
+            'tickUpper': MAX_TICK,
+            'amount0Desired': amount0,
+            'amount1Desired': amount1,
+            'amount0Min': 0,
+            'amount1Min': 0,
+            'recipient': self.account.address,
+            'deadline': self.w3.eth.get_block('latest')['timestamp'] + 1200 }).build_transaction({'from': self.account.address,'gas': 1000000,'gasPrice': self.w3.eth.gas_price,'nonce': self.w3.eth.get_transaction_count(self.account.address)})
+
+             # Sign and send
+            signed_tx = self.w3.eth.account.sign_transaction(tx, self.account.key)
+            tx_hash = self.w3.eth.send_raw_transaction(signed_tx.raw_transaction)
+        
+            # Wait for confirmation
+            tx_receipt = self.w3.eth.wait_for_transaction_receipt(tx_hash)
+        
+            if tx_receipt['status'] != 1:
+                raise RuntimeError("Failed to add liquidity")
+            
+            return tx_hash.hex()
+        
+        except Exception as e:
+            raise RuntimeError(f"failed to add liquidity: {str(e)}") 
+                
+
+
 # Main function to run the script
 def main():
     rpc_url = os.environ.get("RPC_URL")
@@ -107,15 +241,25 @@ def main():
     mockUSDT = "0x3E6Ed0430B872599BC7b2E1c9833B8f1552b5518"
     UniswapV3FactoryKodiak = "0x217Cd80795EfCa5025d47023da5c03a24fA95356"
     chain_id = 80084
-    
+    nft_manager_address = "0xc0568c6e9d5404124c8aa9efd955f3f14c8e64a6"
     
     try:
-        setup = KodiakV3Setup(mockUSD, mockUSDT, UniswapV3FactoryKodiak, rpc_url)
+        setup = KodiakV3Setup(mockUSD, mockUSDT, UniswapV3FactoryKodiak, rpc_url, nft_manager_address)
         setup.set_signer(private_key)
         print("Setup successful!")
         print("Trying to create Pool...")
-        setup.create_pool(chain_id)
-    
+        pool_address = setup.create_pool(chain_id)
+        print("Pool at address: ", pool_address)
+        print("tryin to initialize pool with 1:1 price: ")
+        init_tx = setup.initialize_V3pool(pool_address) # d56fc11ce09e050c9a346205cbe5cc968e7e25faa29d75038ec12bf184a879d1
+        print(init_tx)
+
+        print("Trying to fund pool...")
+        amount0 = 1000 * 10**6  # 1000 USDC 
+        amount1 = 1000 * 10**6  # 1000 USDT 
+        tx_hash = setup.add_full_range_liquidity(pool_address, amount0, amount1)
+        print(tx_hash)
+        print("funded pool successfully")
     except Exception as e: 
         print(f"Error when setting up the Pool: {e}")
 
