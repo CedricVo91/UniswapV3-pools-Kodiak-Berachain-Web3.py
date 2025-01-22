@@ -1,6 +1,7 @@
 from web3 import Web3
 from eth_account import Account
 import json
+from dotenv import load_dotenv
 import os
 from typing import Optional # useful to declare types for web3 object types
 import math
@@ -224,10 +225,167 @@ class KodiakV3Setup:
         except Exception as e:
             raise RuntimeError(f"failed to add liquidity: {str(e)}") 
                 
+    def swap_tokens(self, pool_address, amount_in):
+        """
+        Swap tokens in the pool
+        amount_in: Amount to swap in base units (e.g., 500 * 10**6 for 500 USDC)
+        """
+        # Load pool ABI and create contract instance
+        with open("pool_abi.json", "r") as f:
+            pool_abi = json.load(f)
+        pool = self.w3.eth.contract(address=pool_address, abi=pool_abi)
 
+        # Check pool liquidity first
+        liquidity = pool.functions.liquidity().call()
+        print(f"Pool liquidity: {liquidity}")
+        if liquidity == 0:
+            raise RuntimeError("Pool has no liquidity!")
+
+        # Get current slot0 state
+        slot0 = pool.functions.slot0().call()
+        current_sqrt_price = slot0[0]
+        current_tick = slot0[1]
+        print(f"Current tick: {current_tick}")
+
+        # First approve the pool to spend token0
+        with open("ERC20_abi.json", "r") as f:
+            erc20_abi = json.load(f)
+        
+        # token 0 is usdt according to block explorer
+        token0 = self.w3.eth.contract(address=self.token0_address, abi=erc20_abi)
+        token0_decimals = self.get_token_decimals(self.token0_address)
+        print(f'Token0 has address: {self.token0_address}')
+        print(f"Token0 decimals: {token0_decimals}")
+        
+        try:
+            # Approve pool to spend token0
+            approve_tx = token0.functions.approve(
+                pool_address,
+                amount_in
+            ).build_transaction({
+                'from': self.account.address,
+                'gas': 100000,
+                'nonce': self.w3.eth.get_transaction_count(self.account.address)
+            })
+            
+            signed_tx = self.w3.eth.account.sign_transaction(approve_tx, self.account.key)
+            tx_hash = self.w3.eth.send_raw_transaction(signed_tx.raw_transaction)
+            self.w3.eth.wait_for_transaction_receipt(tx_hash)
+            print(f"Approved pool to spend token0")
+
+            MIN_SQRT_RATIO = 4295128739 # min possible
+            MAX_SQRT_RATIO = 1461446703485210103287273052203988822378723970342 # max possible
+
+            # Verify fee tier
+            fee = pool.functions.fee().call()
+            print(f"Pool fee tier: {fee}")
+            
+            # Get token decimals
+            token0_decimals = self.get_token_decimals(self.token0_address)
+            print(f'Token0 has address: {self.token0_address}')
+            print(f'Token1 has address: {self.token1_address}')
+            
+
+            # Estimate gas first
+            gas_estimate = pool.functions.swap(
+                self.account.address,  # recipient
+                True,                  # zeroForOne
+                amount_in,            # amountSpecified
+                MIN_SQRT_RATIO,          # sqrtPriceLimitX96
+                '0x'                  # data
+            ).estimate_gas({
+                'from': self.account.address
+            })
+            print(f"Estimated gas: {gas_estimate}")
+
+
+            # Perform swap
+            swap_tx = pool.functions.swap(
+                self.account.address,  # recipient
+                True,                  # zeroForOne (swapping token0 for token1)
+                amount_in,            # amountSpecified (positive = exact input)
+                MIN_SQRT_RATIO,           # sqrtPriceLimitX96 (MIN_SQRT_RATIO + 1)
+                '0x'                  # empty bytes for data
+            ).build_transaction({
+                'from': self.account.address,
+                'gas': int(gas_estimate * 1.5),
+                'nonce': self.w3.eth.get_transaction_count(self.account.address),
+                'gasPrice': self.w3.eth.gas_price
+            })
+
+            signed_tx = self.w3.eth.account.sign_transaction(swap_tx, self.account.key)
+            tx_hash = self.w3.eth.send_raw_transaction(signed_tx.raw_transaction)
+            receipt = self.w3.eth.wait_for_transaction_receipt(tx_hash)
+            
+            if receipt['status'] != 1:
+                tx = self.w3.eth.get_transaction(tx_hash)
+                try:    
+                    result = self.w3.eth.call({
+                        'to': tx['to'],
+                        'from': tx['from'],
+                        'data': tx['input'],
+                        'value': tx['value'],
+                        'gas': tx['gas'],
+                        'gasPrice': tx['gasPrice']
+                    },
+                    receipt['blockNumber'] - 1
+                    )
+                    print(f"Call result: {result.hex()}")
+                except Exception as e:
+                    print(f"Detailed error: {str(e)}")    
+                raise RuntimeError("Swap failed")
+            
+            return tx_hash.hex()
+
+        except Exception as e:
+            raise RuntimeError(f"Failed to swap tokens: {str(e)}")
+
+    def check_token_balance(self, token_address):
+        """Check token balance for the account"""
+        with open("ERC20_abi.json", "r") as f:
+            erc20_abi = json.load(f)
+        
+        token = self.w3.eth.contract(address=token_address, abi=erc20_abi)
+        balance = token.functions.balanceOf(self.account.address).call()
+        return balance
+    
+    def check_pool_state(self, pool_address):
+        """Check pool state before swap"""
+        with open("pool_abi.json", "r") as f:
+            pool_abi = json.load(f)
+        pool = self.w3.eth.contract(address=pool_address, abi=pool_abi)
+        
+        liquidity = pool.functions.liquidity().call()
+        slot0 = pool.functions.slot0().call()
+        
+        print(f"Pool state:")
+        print(f"- Liquidity: {liquidity}")
+        print(f"- Current sqrt price: {slot0[0]}")
+        print(f"- Current tick: {slot0[1]}")
+        print(f"- Pool unlocked: {slot0[6]}")
+        
+        return liquidity > 0
+    
+        # Add this check before swapping
+    def verify_pool_fee(self, pool_address):
+        """Verify pool fee tier"""
+        with open("pool_abi.json", "r") as f:
+            pool_abi = json.load(f)
+        pool = self.w3.eth.contract(address=pool_address, abi=pool_abi)
+        fee = pool.functions.fee().call()
+        print(f"Pool fee tier: {fee}")
+        return fee
+    
+    def get_token_decimals(self, token_address):
+        """Get token decimals"""
+        with open("ERC20_abi.json", "r") as f:
+            erc20_abi = json.load(f)
+        token = self.w3.eth.contract(address=token_address, abi=erc20_abi)
+        return token.functions.decimals().call()
 
 # Main function to run the script
 def main():
+    load_dotenv()
     rpc_url = os.environ.get("RPC_URL")
     private_key = os.environ.get("PK") # might do that via entering into terminal for security reasons
     #print("rpc url: ", rpc_url)
@@ -254,12 +412,31 @@ def main():
         init_tx = setup.initialize_V3pool(pool_address) # d56fc11ce09e050c9a346205cbe5cc968e7e25faa29d75038ec12bf184a879d1
         print(init_tx)
 
-        print("Trying to fund pool...")
-        amount0 = 1000 * 10**6  # 1000 USDC 
-        amount1 = 1000 * 10**6  # 1000 USDT 
-        tx_hash = setup.add_full_range_liquidity(pool_address, amount0, amount1)
-        print(tx_hash)
-        print("funded pool successfully")
+        #print("Trying to fund pool...")
+        #amount0 = 1000 * 10**6  # 1000 USDC 
+        #amount1 = 1000 * 10**6  # 1000 USDT 
+        #tx_hash = setup.add_full_range_liquidity(pool_address, amount0, amount1)
+        #print(tx_hash)
+        #print("funded pool successfully")
+
+        # check token ordering...
+        print("Trying to swap tokens...")
+        #print(f"Token 0 in the script has address {KodiakV3Setup.token0_address} and MockUSDT has address: {mockUSDT}")
+        # print(f"Token 1 in the script has address {KodiakV3Setup.token1_address} and MockUSDC has address: {mockUSD}")
+        
+        # Check balance before swap
+        token0_balance = setup.check_token_balance(mockUSDT)
+        print(f"Token0 balance: {token0_balance / 10**6} tokens")
+
+        if setup.check_pool_state(pool_address):
+            print("Pool state is valid, proceeding with swap...")
+            amount_to_swap = 50 * 10**6  # Swap 500 tokens
+            print(f'trying to swap {amount_to_swap} tokens')
+            swap_tx = setup.swap_tokens(pool_address, amount_to_swap)
+            print(f"Swap successful! Transaction: {swap_tx}")
+        else:
+            print("Pool state invalid - please add liquidity first")
+    
     except Exception as e: 
         print(f"Error when setting up the Pool: {e}")
 
