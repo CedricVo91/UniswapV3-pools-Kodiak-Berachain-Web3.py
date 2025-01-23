@@ -206,7 +206,7 @@ class KodiakV3PoolVerification:
 def main():
     # Example usage
     rpc_url = "https://bartio.rpc.berachain.com"
-    pool_address = "YOUR_POOL_ADDRESS"
+    pool_address = "0x031634e7190162ade35C80516D958F3dF6a5C513"
     nft_manager_address = "0xc0568c6e9d5404124c8aa9efd955f3f14c8e64a6"
     position_id = 34883  # Your NFT position ID
     owner_address = "0x50199d4274E898d3E09B335fD233ADC55544F223"
