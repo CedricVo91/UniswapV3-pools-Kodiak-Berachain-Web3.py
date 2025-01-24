@@ -32,7 +32,7 @@ class KodiakV3Setup:
 
         # load factory ABI and create contract instance
         try:
-            with open("factory_abi.json", "r") as abi_json:
+            with open("./abis/factory_abi.json", "r") as abi_json:
                 abi = json.load(abi_json)
 
             self.factory = self.w3.eth.contract(address=self.factory_address, abi = abi)
@@ -111,7 +111,7 @@ class KodiakV3Setup:
         # 3. Multiply by 2^96 for Q64.96 encoding
         INITIAL_SQRTPRICE = 1 * 2**96  # = 79228162514264337593543950336
         
-        with open("pool_abi.json", "r") as f:
+        with open("./abis/pool_abi.json", "r") as f:
             pool_abi = json.load(f)
         pool = self.w3.eth.contract(address=pool_address, abi = pool_abi)
 
@@ -163,12 +163,12 @@ class KodiakV3Setup:
         MIN_TICK = -887272
         MAX_TICK = 887272 
         #initialize the nft_manager contract on Uniswap V3
-        with open("nft_manager_abi.json", "r") as f:
+        with open("./abis/nft_manager_abi.json", "r") as f:
             nft_manager_abi = json.load(f)
         
         # Initialize the nft_manager V3
         # Get pool fee instead of hardcoding it
-        with open("pool_abi.json", "r") as f:
+        with open("./abis/pool_abi.json", "r") as f:
             pool_abi = json.load(f)
         pool = self.w3.eth.contract(address=pool_address, abi=pool_abi)
         pool_fee = pool.functions.fee().call()
@@ -179,7 +179,7 @@ class KodiakV3Setup:
         token0_address = Web3.to_checksum_address(self.token0_address)
         token1_address = Web3.to_checksum_address(self.token1_address)
         # Approve the spending of token 0 and 1 on the nft manager
-        with open("ERC20_abi.json", "r") as f:
+        with open("./abis/ERC20_abi.json", "r") as f:
             erc20_abi = json.load(f)
         
         try:
@@ -249,11 +249,11 @@ class KodiakV3Setup:
         
         try:
                     # Load ABIs
-            with open("swaprouterv3_abi.json", "r") as f:
+            with open("./abis/swaprouterv3_abi.json", "r") as f:
                 router_abi = json.load(f)
-            with open("pool_abi.json", "r") as f:
+            with open("./abis/pool_abi.json", "r") as f:
                 pool_abi = json.load(f)
-            with open("ERC20_abi.json", "r") as f:
+            with open("./abis/ERC20_abi.json", "r") as f:
                 erc20_abi = json.load(f)
             
             # Contract setup
@@ -316,11 +316,11 @@ class KodiakV3Setup:
         
         try:
             # Load ABIs
-            with open("swaprouterv3_abi.json", "r") as f:
+            with open("./abis/swaprouterv3_abi.json", "r") as f:
                 router_abi = json.load(f)
-            with open("pool_abi.json", "r") as f:
+            with open("./abis/pool_abi.json", "r") as f:
                 pool_abi = json.load(f)
-            with open("ERC20_abi.json", "r") as f:
+            with open("./abis/ERC20_abi.json", "r") as f:
                 erc20_abi = json.load(f)
             
             # Contract setup
@@ -377,7 +377,7 @@ class KodiakV3Setup:
             raise RuntimeError(f"Swap failed: {str(e)}")
         
     def query_event_logs(self, pool_address: str):
-        with open('pool_abi.json', 'r') as f:
+        with open('./abis/pool_abi.json', 'r') as f:
             pool_abi = json.load(f)
 
         pool = self.w3.eth.contract(address = pool_address, abi = pool_abi)
@@ -419,7 +419,7 @@ class KodiakV3Setup:
         return event_logs
         
     def query_single_event(self, pool_address: str, event_name: str):
-        with open('pool_abi.json', 'r') as f:
+        with open('./abis/pool_abi.json', 'r') as f:
             pool_abi = json.load(f)
 
         pool = self.w3.eth.contract(address=pool_address, abi=pool_abi)
