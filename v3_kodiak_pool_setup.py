@@ -224,12 +224,12 @@ class KodiakV3Setup:
             if tx_receipt['status'] != 1:
                 raise RuntimeError("Failed to add liquidity")
             
-            # After minting liquidity, add:
+            # After minting liquidity, add: 
             mint_event = nft_manager.events.IncreaseLiquidity().process_receipt(tx_receipt)[0]
             position_id = mint_event['args']['tokenId']
             print(f"Position ID: {position_id}")
 
-            # After your add_full_range_liquidity succeeds:
+            # After your add_full_range_liquidity succeeds: 
             pool = self.w3.eth.contract(address=pool_address, abi=pool_abi)
             position = nft_manager.functions.positions(position_id).call()
             print(f"Position ticks: {position[5]} to {position[6]}")
@@ -311,6 +311,129 @@ class KodiakV3Setup:
         except Exception as e:
             raise RuntimeError(f"Swap failed: {str(e)}")
 
+    def swap_tokens_alternative(self, router_address: str, pool_address: str, amount_in: int):
+        
+        
+        try:
+            # Load ABIs
+            with open("swaprouterv3_abi.json", "r") as f:
+                router_abi = json.load(f)
+            with open("pool_abi.json", "r") as f:
+                pool_abi = json.load(f)
+            with open("ERC20_abi.json", "r") as f:
+                erc20_abi = json.load(f)
+            
+            # Contract setup
+            router = self.w3.eth.contract(address=Web3.to_checksum_address(router_address), abi=router_abi)
+            token1 = self.w3.eth.contract(address=Web3.to_checksum_address(self.token1_address), abi=erc20_abi)
+            
+            # Get pool fee
+            pool = self.w3.eth.contract(address=Web3.to_checksum_address(pool_address), abi=pool_abi)
+            fee = pool.functions.fee().call()
+            
+            # Approve router
+            approve_tx = token1.functions.approve(router_address, amount_in).build_transaction({
+                'from': self.account.address,
+                'nonce': self.w3.eth.get_transaction_count(self.account.address),
+                'gas': 100000
+            })
+            signed_tx = self.w3.eth.account.sign_transaction(approve_tx, self.account.key)
+            tx_hash = self.w3.eth.send_raw_transaction(signed_tx.raw_transaction)
+            self.w3.eth.wait_for_transaction_receipt(tx_hash)
+            print("Token Approved")
+
+            params = {
+                "tokenIn": self.token1_address,
+                "tokenOut": self.token0_address,
+                "fee": fee,
+                'recipient': self.account.address,
+                'deadline': self.w3.eth.get_block('latest')['timestamp'] + 1200,
+                'amountIn': amount_in,
+                'amountOutMinimum': 0,
+                'sqrtPriceLimitX96': 0
+            }
+
+            print("params are: ", params)
+
+            # Execute swap
+            swap_tx = router.functions.exactInputSingle(params).build_transaction({
+                'from': self.account.address,
+                'value': 0,
+                'gas': 500000,
+                'nonce': self.w3.eth.get_transaction_count(self.account.address),
+                'gasPrice': self.w3.eth.gas_price
+            })
+
+            signed_tx = self.w3.eth.account.sign_transaction(swap_tx, self.account.key)
+            tx_hash = self.w3.eth.send_raw_transaction(signed_tx.raw_transaction)
+            receipt = self.w3.eth.wait_for_transaction_receipt(tx_hash)
+
+            if receipt['status'] != 1:
+                raise RuntimeError(f"Swap failed: {tx_hash.hex()}")
+
+            return tx_hash.hex()
+
+        except Exception as e:
+            raise RuntimeError(f"Swap failed: {str(e)}")
+        
+    def query_event_logs(self, pool_address: str):
+        with open('pool_abi.json', 'r') as f:
+            pool_abi = json.load(f)
+
+        pool = self.w3.eth.contract(address = pool_address, abi = pool_abi)
+        
+        # get the event names available in the contract
+        available_log_names = []
+        for entry in pool_abi:
+            if entry['type'] == 'event':
+                available_log_names.append(entry['name'])
+        #print(available_log_names)
+
+        # Get earliest block involved with my contract (the block when the contract was deployed):
+        """
+        # Get contract deployment block -> to adjust later
+        deploy_block = self.w3.eth.get_transaction_receipt(
+            self.w3.eth.get_transaction_by_block(
+            self.w3.eth.get_transaction_count(pool_address, "earliest"),
+            0
+            )["hash"]
+            )["blockNumber"]
+        """
+
+        # manual: know the initialize block number via block explorer
+        initialization_block = 9593217
+
+        # Get latest block (the one of right now or close to it)
+        latest_block = self.w3.eth.block_number
+        
+        event_logs = {}
+        for entry in pool_abi:
+            if entry['type'] == 'event' and entry['name'] in ['Swap', 'Initialize', 'Mint']:
+                event_name = entry['name']
+                # getattr() helps when you have function names stored in variables/strings and need to call them.
+                event = getattr(pool.events, event_name) # learning: good python method to get function names that match functions as strings in my lists or dic data structs.
+                #logs = event.get_logs(from_block=0, to_block=latest_block) -> error Error when setting up the Pool: 413 Client Error: Request Entity Too Large for url: https://bartio.rpc.berachain.com/
+                logs = event.get_logs(from_block=initialization_block, to_block = latest_block)
+                event_logs[event_name] = logs
+                
+        return event_logs
+        
+    def query_single_event(self, pool_address: str, event_name: str):
+        with open('pool_abi.json', 'r') as f:
+            pool_abi = json.load(f)
+
+        pool = self.w3.eth.contract(address=pool_address, abi=pool_abi)
+        start_block = 9593217
+        end_block = self.w3.eth.block_number
+        
+        event = getattr(pool.events, event_name)
+        try:
+            logs = event.get_logs(from_block=start_block, to_block=end_block)
+            print(f"Found {len(logs)} events")
+            return logs
+        except Exception as e:
+            print(f"Error: {e}")
+
 # Main function to run the script
 def main():
     load_dotenv()
@@ -351,8 +474,16 @@ def main():
 
         amount_to_swap = 500 * 10**6  # Swap 500 tokens
         print(f'trying to swap {amount_to_swap} tokens')
-        swap_tx = setup.swap_tokens(router_address,pool_address, amount_to_swap)
-        print(f"Swap successful! Transaction: {swap_tx}")
+        # swaps usdt (token 0) for usdc (token 1)
+        #swap_tx = setup.swap_tokens(router_address,pool_address, amount_to_swap)
+        # uses usdc for usdt with a different swap function on iswaprouter
+        #swap_tx = setup.swap_tokens_alternative(router_address, pool_address,amount_to_swap)
+        #print(f"Swap successful! Transaction: {swap_tx}")
+
+        # get events for pool
+        #logs = setup.query_event_logs(pool_address) -> exceed rpc limit apparently
+        logs = setup.query_single_event(pool_address, 'Swap')
+        print(logs)
 
     except Exception as e: 
         print(f"Error when setting up the Pool: {e}")
